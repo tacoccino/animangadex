@@ -1,0 +1,19 @@
+# Database (user-specific, can be large, rebuilt by re-indexing)
+manga_index.db
+
+# manga-ocr / Hugging Face model cache
+~/.cache/huggingface/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Gradio temp files
+gradio_cached_examples/
+flagged/
+
+# OS
+.DS_Store
+Thumbs.db
