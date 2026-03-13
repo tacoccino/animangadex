@@ -303,6 +303,16 @@ def clear_manga_index():
         conn.executescript("DELETE FROM panels; DELETE FROM panels_fts;")
     return "Manga index cleared."
 
+def get_allowed_paths():
+    """Collect all unique folders containing indexed files for Gradio allowed_paths."""
+    paths = set()
+    with get_db() as conn:
+        for row in conn.execute("SELECT DISTINCT vid_filepath FROM subtitles WHERE vid_filepath IS NOT NULL"):
+            paths.add(str(Path(row["vid_filepath"]).parent))
+        for row in conn.execute("SELECT DISTINCT folder FROM panels"):
+            paths.add(row["folder"])
+    return list(paths)
+
 def clear_anime_index():
     with get_db() as conn:
         conn.executescript("DELETE FROM subtitles; DELETE FROM subtitles_fts;")
@@ -445,6 +455,7 @@ if __name__ == "__main__":
     init_db()
     ui = build_ui()
     ui.launch(
+        allowed_paths=get_allowed_paths(),
         inbrowser=True,
         theme=gr.themes.Base(
             primary_hue="rose",
