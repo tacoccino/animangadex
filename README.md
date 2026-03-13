@@ -3,7 +3,7 @@
 Search Japanese text across manga panels and anime subtitles. Jump directly to the panel or scene where a word or phrase appears.
 
 - **Manga:** panels are indexed locally using **manga-ocr**, a model fine-tuned for manga fonts, vertical text, and speech bubbles
-- **Anime:** subtitle files (`.srt` / `.ass`) are parsed and indexed; clicking a result opens your video player at that exact timestamp
+- **Anime:** subtitle files (`.srt` / `.ass`) are parsed and indexed; clicking a result plays that scene directly in the browser
 
 ## Setup
 
@@ -31,7 +31,7 @@ The app opens in your browser at `http://localhost:7860`.
 
 - Go to the **Index** tab, **Manga Panels** column
 - Enter the path to a folder containing your panel images
-- Click **▶ Index Panels**
+- Click **Index Panels**
 - Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`, `.bmp`
 - Subfolders are scanned recursively — point at a whole series folder if you like
 - Panels with no detected text are skipped automatically, so no need to curate your folder
@@ -68,23 +68,23 @@ Point the indexer at `gochiusa/` and it recurses through everything.
 
 ### Preparing your files
 
-The one rule: **subtitle file and video file must be in the same folder with the same filename stem.**
+Two rules: **subtitle file and video file must be in the same folder with the same filename stem**, and **video must be H.264 MP4** for reliable browser playback.
 
 ```
 gochiusa/
-  S01E01.mkv
+  S01E01.mp4
   S01E01.ja.srt
-  S01E02.mkv
+  S01E02.mp4
   S01E02.ja.srt
 ```
 
-Language suffixes on the subtitle file (`.ja`, `.jpn`, `.jp`) are stripped automatically when matching to a video, so `S01E01.ja.srt` will correctly pair with `S01E01.mkv`.
+Language suffixes on the subtitle file (`.ja`, `.jpn`, `.jp`) are stripped automatically when matching to a video, so `S01E01.ja.srt` will correctly pair with `S01E01.mp4`.
 
 Nesting by season is fine — the indexer recurses through subfolders.
 
-**Subtitle formats:** `.srt` and `.ass`/`.ssa` are both supported. `.ass` is more common for anime and is handled correctly — styling tags like `{\an8}` are stripped before indexing.
+**Subtitle formats:** `.srt` and `.ass`/`.ssa` are both supported. `.ass` styling tags are stripped before indexing.
 
-**Extracting subs from MKV:** if your subtitles are embedded in the `.mkv` rather than as a separate file, use ffmpeg to extract them:
+**Extracting subs from MKV:** if your subtitles are embedded in the video file, use ffmpeg to extract them:
 
 ```bash
 ffmpeg -i episode.mkv -map 0:s:0 episode.ja.srt
@@ -92,24 +92,45 @@ ffmpeg -i episode.mkv -map 0:s:0 episode.ja.srt
 
 Change `s:0` to whichever subtitle track index is Japanese.
 
+**Converting MKV to MP4:**
+
+If your files are already H.264, this is a fast lossless remux (no re-encoding):
+
+```bash
+# Mac/Linux
+for f in *.mkv; do ffmpeg -i "$f" -c copy "${f%.mkv}.mp4"; done
+
+# Windows (Command Prompt)
+for %f in (*.mkv) do ffmpeg -i "%f" -c copy "%~nf.mp4"
+```
+
+If your files are H.265/HEVC, you'll need to re-encode to H.264 (takes longer):
+
+```bash
+# Mac/Linux
+for f in *.mkv; do ffmpeg -i "$f" -c:v libx264 -crf 18 -preset fast -c:a copy "${f%.mkv}.mp4"; done
+```
+
+Not sure which codec your files use? Check with:
+
+```bash
+ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=noprint_wrappers=1 yourfile.mkv
+```
+
 ### Indexing subtitles
 
 - Go to the **Index** tab, **Anime Subtitles** column
 - Enter the path to your episodes folder
-- Click **▶ Index Subtitles**
+- Click **Index Subtitles**
 
 ### Searching
 
 - Go to the **Anime Search** tab
 - Type a Japanese word or phrase
 - Results show episode name, timestamp, and the matching line
-- Click any row to open that scene in your video player
+- Click any row to load that scene in the in-browser player
 
-The player seeks 1 second before the line starts so you get a moment of context.
-
-### Video player
-
-The app tries **mpv** first, then falls back to **VLC**. mpv is recommended for its precise seeking. It checks common Windows install locations automatically (Program Files, Scoop), so it should be found even if not on your PATH. If neither is found, the error message will tell you what to do.
+The player seeks 1 second before the subtitle line starts so you get a moment of context.
 
 ---
 
