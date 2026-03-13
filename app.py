@@ -257,33 +257,58 @@ def search_subtitles(query: str, max_results: int = 30):
         table.append([r["id"], r["episode"], ms_to_timestamp(r["start_ms"]), r["text"], has_video])
     return table, f"Found {len(table)} line(s) for {query}"
 
+def _sub_to_vtt(sub_filepath: str) -> str:
+    """Convert a .srt or .ass subtitle file to WebVTT format string for browser playback."""
+    try:
+        import pysubs2
+        subs = pysubs2.load(sub_filepath, encoding="utf-8")
+        lines = ["WEBVTT", ""]
+        for i, line in enumerate(subs):
+            text = _strip_ass_tags(line.text).replace("\\N", "\n").replace("\\n", "\n").strip()
+            if not text:
+                continue
+            def ms_to_vtt(ms):
+                h, r = divmod(ms, 3_600_000)
+                m, r = divmod(r, 60_000)
+                s, ms_ = divmod(r, 1_000)
+                return f"{h:02d}:{m:02d}:{s:02d}.{ms_:03d}"
+            lines.append(f"{i+1}")
+            lines.append(f"{ms_to_vtt(line.start)} --> {ms_to_vtt(line.end)}")
+            lines.append(text)
+            lines.append("")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"VTT conversion error: {e}")
+        return ""
+
 def load_scene(selected: gr.SelectData, table_data):
     """On row click: load the video into the in-browser player at the right timestamp."""
     if selected is None or table_data is None:
-        return None, 0.0, "Select a result row to load the scene."
+        return None, 0.0, "Select a result row to load the scene.", ""
     try:
         import pandas as pd
         row_idx = selected.index[0]
         row_id = int(table_data.iloc[row_idx, 0] if isinstance(table_data, pd.DataFrame) else table_data[row_idx][0])
     except Exception:
-        return None, 0.0, "Couldn't determine selected row."
+        return None, 0.0, "Couldn't determine selected row.", ""
 
     with get_db() as conn:
         row = conn.execute(
-            "SELECT vid_filepath, start_ms FROM subtitles WHERE id=?", (row_id,)
+            "SELECT vid_filepath, sub_filepath, start_ms FROM subtitles WHERE id=?", (row_id,)
         ).fetchone()
 
     if not row or not row["vid_filepath"]:
         return None, 0.0, (
             "No video file found. Make sure the video is in the same folder as the "
             "subtitle file with the same filename stem (e.g. S01E01.mkv + S01E01.ja.srt)."
-        )
+        ), ""
     if not Path(row["vid_filepath"]).exists():
-        return None, 0.0, f"Video file not found at: {row['vid_filepath']}"
+        return None, 0.0, f"Video file not found at: {row['vid_filepath']}", ""
 
     start_secs = max(0.0, (row["start_ms"] - 1000) / 1000)
     label = f"{Path(row['vid_filepath']).name}  at  {ms_to_timestamp(row['start_ms'])}"
-    return row["vid_filepath"], start_secs, label
+    vtt = _sub_to_vtt(row["sub_filepath"]) if row["sub_filepath"] else ""
+    return row["vid_filepath"], start_secs, label, vtt
 
 # Stats ------------------------------------------------------------------
 
@@ -320,25 +345,67 @@ def clear_anime_index():
 
 # UI ---------------------------------------------------------------------
 
-# JS: after the video element src changes, seek to the target time.
-# We store the desired seek time in a hidden number component and watch for
-# video load events to apply it.
 SEEK_JS = """
-(filepath, seek_secs) => {
-    // Give Gradio a moment to update the <video> src, then seek.
+(filepath, seek_secs, vtt_content) => {
     setTimeout(() => {
-        const videos = document.querySelectorAll('#anime-player video');
-        if (videos.length > 0) {
-            const v = videos[0];
-            const applySeek = () => { v.currentTime = seek_secs; v.play(); };
-            if (v.readyState >= 1) {
-                applySeek();
-            } else {
-                v.addEventListener('loadedmetadata', applySeek, { once: true });
-            }
+        const container = document.querySelector('#anime-player');
+        if (!container) return [filepath, seek_secs, vtt_content];
+        const v = container.querySelector('video');
+        if (!v) return [filepath, seek_secs, vtt_content];
+
+        // Inject subtitle track
+        container.querySelectorAll('track').forEach(t => t.remove());
+        if (vtt_content && vtt_content.trim()) {
+            const blob = new Blob([vtt_content], { type: 'text/vtt' });
+            const url  = URL.createObjectURL(blob);
+            const track = document.createElement('track');
+            track.kind    = 'subtitles';
+            track.label   = 'Japanese';
+            track.srclang = 'ja';
+            track.src     = url;
+            track.default = false;   // off by default; user toggles
+            v.appendChild(track);
+            // Keep blob URL alive for the session (small, fine to not revoke)
         }
+
+        // Seek and play
+        const applySeek = () => { v.currentTime = seek_secs; v.play(); };
+        if (v.readyState >= 1) {
+            applySeek();
+        } else {
+            v.addEventListener('loadedmetadata', applySeek, { once: true });
+        }
+
+        // Add/update subtitle toggle button below the player
+        const playerId = 'animangadex-sub-toggle';
+        let btn = document.getElementById(playerId);
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = playerId;
+            btn.style.cssText = 'margin-top:8px;padding:6px 14px;border-radius:6px;border:1px solid #888;background:#333;color:#fff;cursor:pointer;font-size:0.85rem;font-weight:600;';
+            container.parentNode.insertBefore(btn, container.nextSibling);
+        }
+        const updateBtn = () => {
+            const track = v.textTracks[0];
+            const on = track && track.mode === 'showing';
+            btn.textContent = on ? 'Subtitles: ON' : 'Subtitles: OFF';
+            btn.style.background = on ? '#c0392b' : '#333';
+        };
+        btn.onclick = () => {
+            const track = v.textTracks[0];
+            if (!track) return;
+            track.mode = track.mode === 'showing' ? 'hidden' : 'showing';
+            updateBtn();
+        };
+        // Initial state
+        if (v.textTracks.length > 0) {
+            updateBtn();
+        } else {
+            v.addEventListener('loadedmetadata', updateBtn, { once: true });
+        }
+
     }, 300);
-    return [filepath, seek_secs];
+    return [filepath, seek_secs, vtt_content];
 }
 """
 
@@ -415,8 +482,9 @@ def build_ui():
                             autoplay=True,
                             elem_id="anime-player",
                         )
-                        # Hidden number holds the seek target; JS reads it after src change
+                        # Hidden components for seek time and VTT subtitle content
                         seek_time = gr.Number(value=0.0, visible=False)
+                        vtt_content = gr.Textbox(value="", visible=False)
 
                 anime_search_btn.click(fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status])
                 anime_search_input.submit(fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status])
@@ -424,11 +492,11 @@ def build_ui():
                 results_table.select(
                     fn=load_scene,
                     inputs=[results_table],
-                    outputs=[video_player, seek_time, player_label],
+                    outputs=[video_player, seek_time, player_label, vtt_content],
                 ).then(
                     fn=None,
-                    inputs=[video_player, seek_time],
-                    outputs=[video_player, seek_time],
+                    inputs=[video_player, seek_time, vtt_content],
+                    outputs=[video_player, seek_time, vtt_content],
                     js=SEEK_JS,
                 )
 
