@@ -18,6 +18,55 @@ from pathlib import Path
 import gradio as gr
 from PIL import Image
 
+
+import json
+import platform
+
+SETTINGS_PATH = "settings.json"
+
+DEFAULT_PLAYER_PATHS = {
+    "mpv": {
+        "Darwin":  "/usr/local/bin/mpv",
+        "Linux":   "/usr/bin/mpv",
+        "Windows": r"C:\Program Files\mpv\mpv.exe",
+    },
+    "vlc": {
+        "Darwin":  "/Applications/VLC.app/Contents/MacOS/VLC",
+        "Linux":   "/usr/bin/vlc",
+        "Windows": r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+    },
+}
+
+def default_settings():
+    os_name = platform.system()
+    return {
+        "playback_mode": "browser",          # "browser" | "mpv" | "vlc"
+        "mpv_path": DEFAULT_PLAYER_PATHS["mpv"].get(os_name, "mpv"),
+        "vlc_path": DEFAULT_PLAYER_PATHS["vlc"].get(os_name, "vlc"),
+    }
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Fill in any missing keys from defaults
+        defaults = default_settings()
+        for k, v in defaults.items():
+            data.setdefault(k, v)
+        return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default_settings()
+
+def save_settings(playback_mode, mpv_path, vlc_path):
+    settings = {
+        "playback_mode": playback_mode,
+        "mpv_path": mpv_path,
+        "vlc_path": vlc_path,
+    }
+    with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+    return "Settings saved."
+
 # Database ---------------------------------------------------------------
 
 DB_PATH = "manga_index.db"
@@ -253,8 +302,9 @@ def search_subtitles(query: str, max_results: int = 30):
 
     table = []
     for r in rows:
-        has_video = "Open" if r["vid_filepath"] else "-"
-        table.append([r["id"], r["episode"], ms_to_timestamp(r["start_ms"]), r["text"], has_video])
+        # Encode missing-video flag into id field as negative (used by CSS to gray the row)
+        row_id = r["id"] if r["vid_filepath"] else -r["id"]
+        table.append([row_id, r["episode"], ms_to_timestamp(r["start_ms"]), r["text"]])
     return table, f"Found {len(table)} line(s) for {query}"
 
 def _sub_to_vtt(sub_filepath: str) -> str:
@@ -281,16 +331,16 @@ def _sub_to_vtt(sub_filepath: str) -> str:
         print(f"VTT conversion error: {e}")
         return ""
 
-def load_scene(selected: gr.SelectData, table_data):
+def load_scene(selected: gr.SelectData, table_data, playback_mode_state):
     """On row click: load the video into the in-browser player at the right timestamp."""
     if selected is None or table_data is None:
-        return None, 0.0, "Select a result row to load the scene.", ""
+        return None, 0.0, "Select a result row to load the scene.", "", ""
     try:
         import pandas as pd
         row_idx = selected.index[0]
-        row_id = int(table_data.iloc[row_idx, 0] if isinstance(table_data, pd.DataFrame) else table_data[row_idx][0])
+        row_id = abs(int(table_data.iloc[row_idx, 0] if isinstance(table_data, pd.DataFrame) else table_data[row_idx][0]))
     except Exception:
-        return None, 0.0, "Couldn't determine selected row.", ""
+        return None, 0.0, "Couldn't determine selected row.", "", ""
 
     with get_db() as conn:
         row = conn.execute(
@@ -301,14 +351,27 @@ def load_scene(selected: gr.SelectData, table_data):
         return None, 0.0, (
             "No video file found. Make sure the video is in the same folder as the "
             "subtitle file with the same filename stem (e.g. S01E01.mkv + S01E01.ja.srt)."
-        ), ""
+        ), "", "no_video"
     if not Path(row["vid_filepath"]).exists():
-        return None, 0.0, f"Video file not found at: {row['vid_filepath']}", ""
+        return None, 0.0, f"Video file not found at: {row['vid_filepath']}", "", "no_video"
 
     start_secs = max(0.0, (row["start_ms"] - 1000) / 1000)
     label = f"{Path(row['vid_filepath']).name}  at  {ms_to_timestamp(row['start_ms'])}"
     vtt = _sub_to_vtt(row["sub_filepath"]) if row["sub_filepath"] else ""
-    return row["vid_filepath"], start_secs, label, vtt
+    settings = load_settings()
+    mode = playback_mode_state if playback_mode_state else settings["playback_mode"]
+
+    if mode in ("mpv", "vlc"):
+        # Launch external player and return nothing to the browser player
+        player_path = settings["mpv_path"] if mode == "mpv" else settings["vlc_path"]
+        start_arg = f"--start={start_secs:.1f}" if mode == "mpv" else f"--start-time={start_secs:.0f}"
+        try:
+            subprocess.Popen([player_path, start_arg, row["vid_filepath"]])
+            return None, 0.0, label, "", "external_ok"
+        except FileNotFoundError:
+            return None, 0.0, f"Player not found at: {player_path}. Check your path in Settings.", "", "external_err"
+
+    return row["vid_filepath"], start_secs, label, vtt, "browser"
 
 # Stats ------------------------------------------------------------------
 
@@ -345,8 +408,30 @@ def clear_anime_index():
 
 # UI ---------------------------------------------------------------------
 
+TABLE_JS = """
+() => {
+    // Gray out rows whose hidden id cell contains a negative number (no video matched)
+    setTimeout(() => {
+        const table = document.querySelector('#anime-results table');
+        if (!table) return;
+        table.querySelectorAll('tbody tr').forEach(row => {
+            // Gray out rows with missing video
+            const idCell = row.querySelector('td:first-child');
+            if (idCell && parseFloat(idCell.innerText) < 0) {
+                row.classList.add('no-video');
+            } else {
+                row.classList.remove('no-video');
+            }
+        });
+    }, 150);
+}
+"""
+
 SEEK_JS = """
-(filepath, seek_secs, vtt_content) => {
+(filepath, seek_secs, vtt_content, playback_result) => {
+    if (playback_result === 'external_ok' || playback_result === 'external_err' || playback_result === 'no_video') {
+        return [filepath, seek_secs, vtt_content, playback_result];
+    }
     setTimeout(() => {
         const container = document.querySelector('#anime-player');
         if (!container) return [filepath, seek_secs, vtt_content];
@@ -405,7 +490,7 @@ SEEK_JS = """
         }
 
     }, 300);
-    return [filepath, seek_secs, vtt_content];
+    return [filepath, seek_secs, vtt_content, playback_result];
 }
 """
 
@@ -449,7 +534,7 @@ def build_ui():
                     manga_search_input = gr.Textbox(label="Search (Japanese)", placeholder="...", scale=4)
                     manga_max = gr.Slider(label="Max results", minimum=5, maximum=100, step=5, value=20, scale=1)
                     manga_search_btn = gr.Button("Search", variant="primary", scale=1)
-                manga_status = gr.Textbox(label="", interactive=False, lines=1)
+                manga_status = gr.Textbox(label="Results", interactive=False, lines=1, elem_classes=["status-text"])
                 gallery = gr.Gallery(label="Matching Panels", columns=3, height=620, object_fit="contain")
                 manga_search_btn.click(fn=search_panels, inputs=[manga_search_input, manga_max], outputs=[gallery, manga_status])
                 manga_search_input.submit(fn=search_panels, inputs=[manga_search_input, manga_max], outputs=[gallery, manga_status])
@@ -461,14 +546,15 @@ def build_ui():
                     anime_max = gr.Slider(label="Max results", minimum=5, maximum=100, step=5, value=30, scale=1)
                     anime_search_btn = gr.Button("Search", variant="primary", scale=1)
 
-                anime_status = gr.Textbox(label="", interactive=False, lines=1)
+                anime_status = gr.Textbox(label="Results", interactive=False, lines=1, elem_classes=["status-text"])
 
                 with gr.Row():
                     with gr.Column(scale=3):
                         results_table = gr.Dataframe(
-                            headers=["id", "Episode", "Timestamp", "Line", "Video"],
-                            datatype=["number", "str", "str", "str", "str"],
-                            column_count=(5, "fixed"),
+                            elem_id="anime-results",
+                            headers=["id", "Episode", "Timestamp", "Line"],
+                            datatype=["number", "str", "str", "str"],
+                            column_count=(4, "fixed"),
                             interactive=False,
                             wrap=True,
                         )
@@ -482,35 +568,76 @@ def build_ui():
                             autoplay=True,
                             elem_id="anime-player",
                         )
-                        # Hidden components for seek time and VTT subtitle content
+                        # Hidden components
                         seek_time = gr.Number(value=0.0, visible=False)
                         vtt_content = gr.Textbox(value="", visible=False)
+                        playback_mode_state = gr.Textbox(value="", visible=False)
+                        playback_result = gr.Textbox(value="", visible=False)
 
-                anime_search_btn.click(fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status])
-                anime_search_input.submit(fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status])
+                anime_search_btn.click(
+                    fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status]
+                ).then(fn=None, inputs=[], outputs=[], js=TABLE_JS)
+                anime_search_input.submit(
+                    fn=search_subtitles, inputs=[anime_search_input, anime_max], outputs=[results_table, anime_status]
+                ).then(fn=None, inputs=[], outputs=[], js=TABLE_JS)
 
                 results_table.select(
                     fn=load_scene,
-                    inputs=[results_table],
-                    outputs=[video_player, seek_time, player_label, vtt_content],
+                    inputs=[results_table, playback_mode_state],
+                    outputs=[video_player, seek_time, player_label, vtt_content, playback_result],
                 ).then(
                     fn=None,
-                    inputs=[video_player, seek_time, vtt_content],
-                    outputs=[video_player, seek_time, vtt_content],
+                    inputs=[video_player, seek_time, vtt_content, playback_result],
+                    outputs=[video_player, seek_time, vtt_content, playback_result],
                     js=SEEK_JS,
                 )
 
-            # Tab 4: Stats / Manage
+            # Tab 4: Settings
+            with gr.Tab("Settings"):
+                gr.Markdown("### Playback")
+                _s = load_settings()
+                playback_radio = gr.Radio(
+                    choices=[("In-browser", "browser"), ("mpv", "mpv"), ("VLC", "vlc")],
+                    value=_s["playback_mode"],
+                    label="Playback mode",
+                )
+                player_paths_group = gr.Group(visible=_s["playback_mode"] != "browser")
+                with player_paths_group:
+                    mpv_path_input = gr.Textbox(label="mpv executable path", value=_s["mpv_path"])
+                    vlc_path_input = gr.Textbox(label="VLC executable path", value=_s["vlc_path"])
+
+                save_btn = gr.Button("Save Settings", variant="primary")
+                settings_status = gr.Textbox(label="", interactive=False, lines=1, elem_classes=["status-text"])
+
+                # Show/hide path fields based on mode selection
+                playback_radio.change(
+                    fn=lambda m: gr.update(visible=m != "browser"),
+                    inputs=[playback_radio],
+                    outputs=[player_paths_group],
+                )
+                # Also sync the hidden state used by load_scene
+                playback_radio.change(
+                    fn=lambda m: m,
+                    inputs=[playback_radio],
+                    outputs=[playback_mode_state],
+                )
+                save_btn.click(
+                    fn=save_settings,
+                    inputs=[playback_radio, mpv_path_input, vlc_path_input],
+                    outputs=[settings_status],
+                )
+
+            # Tab 5: Stats / Manage
             with gr.Tab("Stats & Manage"):
                 refresh_btn = gr.Button("Refresh Stats")
                 stats_out = gr.Markdown()
                 refresh_btn.click(fn=get_stats, outputs=stats_out)
                 gr.Markdown("---")
-                gr.Markdown("**Danger zone**")
+                gr.HTML("<p style='color:#e53e3e;font-weight:700;font-size:1rem;margin:4px 0'>⚠ Danger Zone</p>")
                 with gr.Row():
                     clear_manga_btn = gr.Button("Clear Manga Index", variant="stop")
                     clear_anime_btn = gr.Button("Clear Anime Index", variant="stop")
-                clear_status = gr.Textbox(interactive=False, lines=1)
+                clear_status = gr.Textbox(label="", interactive=False, lines=1, elem_classes=["status-text"])
                 clear_manga_btn.click(fn=clear_manga_index, outputs=clear_status)
                 clear_anime_btn.click(fn=clear_anime_index, outputs=clear_status)
 
@@ -534,5 +661,23 @@ if __name__ == "__main__":
             .gradio-container { max-width: 1200px; margin: auto; }
             #anime-player video { width: 100%; border-radius: 8px; }
             .tab-container { display: flex !important; justify-content: center !important; }
+
+            /* Status textboxes - dimmer, smaller, no border */
+            .status-text textarea, .status-text input {
+                font-size: 0.82rem !important;
+                color: #888 !important;
+                border: none !important;
+                background: transparent !important;
+                box-shadow: none !important;
+                padding: 2px 0 !important;
+                resize: none !important;
+            }
+            .status-text { border: none !important; box-shadow: none !important; }
+            /* Danger zone buttons */
+            button.stop { background: #e53e3e !important; border-color: #c53030 !important; color: #fff !important; }
+            button.stop:hover { background: #c53030 !important; }
+            .status-text label span { display: none; }
+            /* Gray out rows where video is missing (id encoded as negative) */
+            #anime-results tr.no-video td { color: #999 !important; font-style: italic; }
         """,
     )
