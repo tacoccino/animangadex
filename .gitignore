@@ -17,3 +17,6 @@ flagged/
 # OS
 .DS_Store
 Thumbs.db
+
+# Settings
+settings.json
