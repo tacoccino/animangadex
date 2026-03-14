@@ -15,12 +15,11 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-import gradio as gr
-from PIL import Image
-
-
 import json
 import platform
+
+import gradio as gr
+from PIL import Image
 
 SETTINGS_PATH = "settings.json"
 
@@ -312,16 +311,17 @@ def _sub_to_vtt(sub_filepath: str) -> str:
     try:
         import pysubs2
         subs = pysubs2.load(sub_filepath, encoding="utf-8")
+        def ms_to_vtt(ms):
+            h, r = divmod(ms, 3_600_000)
+            m, r = divmod(r, 60_000)
+            s, ms_ = divmod(r, 1_000)
+            return f"{h:02d}:{m:02d}:{s:02d}.{ms_:03d}"
+
         lines = ["WEBVTT", ""]
         for i, line in enumerate(subs):
             text = _strip_ass_tags(line.text).replace("\\N", "\n").replace("\\n", "\n").strip()
             if not text:
                 continue
-            def ms_to_vtt(ms):
-                h, r = divmod(ms, 3_600_000)
-                m, r = divmod(r, 60_000)
-                s, ms_ = divmod(r, 1_000)
-                return f"{h:02d}:{m:02d}:{s:02d}.{ms_:03d}"
             lines.append(f"{i+1}")
             lines.append(f"{ms_to_vtt(line.start)} --> {ms_to_vtt(line.end)}")
             lines.append(text)
@@ -391,6 +391,11 @@ def clear_manga_index():
         conn.executescript("DELETE FROM panels; DELETE FROM panels_fts;")
     return "Manga index cleared."
 
+def clear_anime_index():
+    with get_db() as conn:
+        conn.executescript("DELETE FROM subtitles; DELETE FROM subtitles_fts;")
+    return "Anime index cleared."
+
 def get_allowed_paths():
     """Collect all unique folders containing indexed files for Gradio allowed_paths."""
     paths = set()
@@ -401,11 +406,6 @@ def get_allowed_paths():
             paths.add(row["folder"])
     return list(paths)
 
-def clear_anime_index():
-    with get_db() as conn:
-        conn.executescript("DELETE FROM subtitles; DELETE FROM subtitles_fts;")
-    return "Anime index cleared."
-
 # UI ---------------------------------------------------------------------
 
 TABLE_JS = """
@@ -415,7 +415,6 @@ TABLE_JS = """
         const table = document.querySelector('#anime-results table');
         if (!table) return;
         table.querySelectorAll('tbody tr').forEach(row => {
-            // Gray out rows with missing video
             const idCell = row.querySelector('td:first-child');
             if (idCell && parseFloat(idCell.innerText) < 0) {
                 row.classList.add('no-video');

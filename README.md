@@ -3,7 +3,7 @@
 Search Japanese text across manga panels and anime subtitles. Jump directly to the panel or scene where a word or phrase appears.
 
 - **Manga:** panels are indexed locally using **manga-ocr**, a model fine-tuned for manga fonts, vertical text, and speech bubbles
-- **Anime:** subtitle files (`.srt` / `.ass`) are parsed and indexed; clicking a result plays that scene directly in the browser
+- **Anime:** subtitle files (`.srt` / `.ass`) are parsed and indexed; clicking a result loads that scene in the player
 
 ## Setup
 
@@ -68,7 +68,7 @@ Point the indexer at `gochiusa/` and it recurses through everything.
 
 ### Preparing your files
 
-Two rules: **subtitle file and video file must be in the same folder with the same filename stem**, and **video must be H.264 MP4** for reliable browser playback.
+Two rules: **subtitle file and video file must be in the same folder with the same filename stem**, and **video must be H.264 MP4** for reliable in-browser playback (external player mode has no codec restrictions).
 
 ```
 gochiusa/
@@ -127,10 +127,30 @@ ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default
 
 - Go to the **Anime Search** tab
 - Type a Japanese word or phrase
-- Results show episode name, timestamp, and the matching line
-- Click any row to load that scene in the in-browser player
+- Results show episode name, timestamp, and the matching subtitle line
+- Rows with no matched video file are shown in gray
+- Click any row to load that scene — the player seeks 1 second before the line for context
+- Use the **Subtitles** toggle button below the player to show or hide Japanese subtitles
 
-The player seeks 1 second before the subtitle line starts so you get a moment of context.
+---
+
+## Settings
+
+The **Settings** tab controls how scenes are opened when you click a result row.
+
+- **In-browser** — plays the video directly in the app (default). Requires H.264 MP4.
+- **mpv** — opens the scene in mpv at the correct timestamp.
+- **VLC** — opens the scene in VLC at the correct timestamp.
+
+When using an external player, set the full path to the executable. Defaults are pre-filled based on your OS but can be edited freely. Click **Save Settings** to persist your choice across restarts.
+
+Default paths:
+
+| | mpv | VLC |
+|---|---|---|
+| macOS | `/usr/local/bin/mpv` | `/Applications/VLC.app/Contents/MacOS/VLC` |
+| Linux | `/usr/bin/mpv` | `/usr/bin/vlc` |
+| Windows | `C:\Program Files\mpv\mpv.exe` | `C:\Program Files\VideoLAN\VLC\vlc.exe` |
 
 ---
 
@@ -142,4 +162,9 @@ The **Stats & Manage** tab shows how many panels and subtitle lines are indexed.
 
 ## .gitignore note
 
-The database file `manga_index.db` is excluded from version control — it's machine-specific and rebuilt by re-indexing.
+Add both of these to your `.gitignore` — they are machine-specific and should not be committed:
+
+```
+manga_index.db
+settings.json
+```
