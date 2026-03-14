@@ -533,5 +533,6 @@ if __name__ == "__main__":
         css="""
             .gradio-container { max-width: 1200px; margin: auto; }
             #anime-player video { width: 100%; border-radius: 8px; }
+            .tab-container { display: flex !important; justify-content: center !important; }
         """,
     )
