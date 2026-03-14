@@ -157,14 +157,3 @@ Default paths:
 ## Stats & Manage
 
 The **Stats & Manage** tab shows how many panels and subtitle lines are indexed. The manga and anime indexes can be cleared independently.
-
----
-
-## .gitignore note
-
-Add both of these to your `.gitignore` — they are machine-specific and should not be committed:
-
-```
-manga_index.db
-settings.json
-```
